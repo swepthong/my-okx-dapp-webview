@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>OKX + Solana (WebView) Demo</title>
+    <style>
+        body { font-family: system-ui, -apple-system, Roboto, Arial; padding:16px; }
+        pre { background:#f6f8fa; padding:12px; border-radius:8px; overflow:auto; }
+        .muted { color:#666 }
+    </style>
+</head>
+<body>
+<h2>OKX Connect (Solana) – WebView Demo</h2>
+<pre id="log"></pre>
+
+<!-- OKX Universal Provider (UMD) -->
+<script src="https://cdn.jsdelivr.net/npm/@okxconnect/universal-provider@1.8.8/dist/okxconnect_universal.js"></script>
+<!-- 可选：bs58（用于消息签名优先走 base58 编码） -->
+<script src="https://cdn.jsdelivr.net/npm/bs58@5.0.0/index.js"></script>
+
+<script>
+    const logEl = document.getElementById('log');
+    const AndroidBridge = window.AndroidBridge || {
+      onConnected: (...a)=>console.log("[onConnected]",...a),
+      onSigned:    (...a)=>console.log("[onSigned]",...a),
+      onError:     (...a)=>console.error("[onError]",...a),
+      onReady:     (...a)=>console.log("[onReady]",...a),
+    };
+
+    function log(...args) {
+      const line = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+      logEl.textContent += line + '\n';
+    }
+
+    // Polyfill
+    if (typeof window.TextEncoder === 'undefined') {
+      window.TextEncoder = function () {
+        return { encode: s => new Uint8Array(unescape(encodeURIComponent(s)).split('').map(c => c.charCodeAt(0))) }
+      };
+    }
+
+    // 配置
+    const dappMeta = {
+      name: "AIDR",
+      icon: "https://your-domain.com/icon.png"
+    };
+    const redirect = "solpocket://wallet-callback";
+    const CHAINS = ["solana:mainnet"];
+
+    let up, session, solAddress;
+
+    async function ensureProvider() {
+      if (up) return up;
+      
+      // 添加调试代码
+      console.log('Script loading check:');
+      console.log('window.OKXUniversalProvider:', window.OKXUniversalProvider);
+      console.log('window.OKXConnectUniversal:', window.OKXConnectUniversal);
+      console.log('All window properties:', Object.keys(window).filter(key => key.includes('OKX')));
+      
+      // 详细检查 OKXConnectUniversal 的内容
+      if (window.OKXConnectUniversal) {
+        console.log('OKXConnectUniversal type:', typeof window.OKXConnectUniversal);
+        console.log('OKXConnectUniversal properties:', Object.getOwnPropertyNames(window.OKXConnectUniversal));
+        console.log('OKXConnectUniversal prototype:', Object.getPrototypeOf(window.OKXConnectUniversal));
+        console.log('OKXConnectUniversal has init method:', typeof window.OKXConnectUniversal.init === 'function');
+      }
+      
+      // 检查两种可能的变量名
+      const okxSDK = window.OKXUniversalProvider || window.OKXConnectUniversal?.OKXUniversalProvider;
+      if (!okxSDK) throw new Error("OKX SDK 未加载完成");
+      
+      // 检查 okxSDK 是否有 init 方法
+      if (typeof okxSDK.init !== 'function') {
+        console.error('okxSDK.init is not a function:', okxSDK);
+        console.error('okxSDK type:', typeof okxSDK);
+        console.error('okxSDK properties:', Object.getOwnPropertyNames(okxSDK));
+        throw new Error("OKX SDK 的 init 方法不可用");
+      }
+      
+      up = await okxSDK.init({ dappMetaData: dappMeta });
+      console.log('Provider initialized:', up);
+      console.log('Provider methods:', Object.getOwnPropertyNames(up));
+      console.log('Provider prototype:', Object.getPrototypeOf(up));
+      AndroidBridge.onReady();
+      return up;
+    }
+
+    // ---- 全局方法（原生可直接调用） ----
+    window.connectWallet = async function() {
+      try {
+        console.log('Starting OKX connection...');
+        console.log('Session config:', { redirect, namespaces: { solana: { chains: CHAINS } } });
+        
+        await ensureProvider();
+        console.log('Provider ready, attempting to connect...');
+        
+        session = await up.connect({
+          namespaces: {
+            solana: {
+              chains: CHAINS,
+              methods: ["solana_signMessage","solana_signTransaction","solana_signAndSendTransaction"],
+              events: ["accountsChanged"]
+            }
+          },
+          sessionConfig: { redirect }
+        });
+        
+        console.log('Connection session:', session);
+        console.log('Session namespaces:', session?.namespaces);
+        console.log('Solana accounts:', session?.namespaces?.solana?.accounts);
+        
+        const acc = session?.namespaces?.solana?.accounts?.[0];
+        solAddress = acc?.split(':').pop();
+        log("Connected:", solAddress);
+        AndroidBridge.onConnected(JSON.stringify({ address: solAddress }));
+        return solAddress;
+      } catch(e) {
+        console.error('Connection error details:', e);
+        console.error('Error stack:', e.stack);
+        log("connect error:", e.message);
+        AndroidBridge.onError(e.message);
+        throw e;
+      }
+    };
+
+    window.signMessage = async function(msg="Hello from AIDR") {
+      try {
+        if (!up || !solAddress) throw new Error("Not connected");
+        const bytes = new TextEncoder().encode(msg);
+        let res;
+        try {
+          const base58 = bs58.encode(bytes);
+          res = await up.request({
+            namespace:"solana", method:"solana_signMessage",
+            params:{ address: solAddress, message: base58, display:"utf8", encoding:"base58" }
+          });
+        } catch {
+          const base64 = btoa(String.fromCharCode(...bytes));
+          res = await up.request({
+            namespace:"solana", method:"solana_signMessage",
+            params:{ address: solAddress, message: base64, display:"utf8", encoding:"base64" }
+          });
+        }
+        log("signMessage result:", res);
+        AndroidBridge.onSigned(JSON.stringify(res));
+        return res;
+      } catch(e) {
+        AndroidBridge.onError(e.message);
+        throw e;
+      }
+    };
+
+    window.signTransaction = async function(txBase64) {
+      try {
+        if (!up || !solAddress) throw new Error("Not connected");
+        const res = await up.request({
+          namespace:"solana", method:"solana_signTransaction",
+          params:{ address: solAddress, transaction: txBase64 }
+        });
+        AndroidBridge.onSigned(JSON.stringify(res));
+        return res;
+      } catch(e) {
+        AndroidBridge.onError(e.message);
+        throw e;
+      }
+    };
+
+            window.signAndSendTransaction = async function(txBase64) {
+          try {
+            if (!up || !solAddress) throw new Error("Not connected");
+            const res = await up.request({
+              namespace:"solana", method:"solana_signAndSendTransaction",
+              params:{ address: solAddress, transaction: txBase64 }
+            });
+            AndroidBridge.onSigned(JSON.stringify(res));
+            return res;
+          } catch(e) {
+            AndroidBridge.onError(e.message);
+            throw e;
+          }
+        };
+        
+        // 页面加载完成
+        window.addEventListener('load', function() {
+            console.log('AIDR Wallet Connect page loaded');
+            console.log('AndroidBridge available:', !!window.AndroidBridge);
+            
+            // 监听页面可见性变化
+            document.addEventListener('visibilitychange', function() {
+                console.log('Page visibility changed:', document.hidden);
+                console.log('Current URL:', window.location.href);
+                console.log('Document title:', document.title);
+            });
+            
+            // 监听页面焦点变化
+            window.addEventListener('focus', function() {
+                console.log('Window focused');
+            });
+            
+            window.addEventListener('blur', function() {
+                console.log('Window blurred');
+            });
+        });
+</script>
+</body>
+</html>
